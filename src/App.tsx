@@ -4,8 +4,10 @@ import 'react-image-crop/dist/ReactCrop.css';
 import { GoogleGenAI } from '@google/genai';
 import {
   ShieldAlert, ShieldCheck, Upload, Image as ImageIcon,
-  CheckCircle, AlertTriangle, X, Database, FileText, Copy, Activity, Clock, List
+  CheckCircle, AlertTriangle, X, Database, FileText, Copy, Activity, Clock, List, LogOut
 } from 'lucide-react';
+import { signInWithEmailAndPassword, createUserWithEmailAndPassword, onAuthStateChanged, signOut, User } from 'firebase/auth';
+import { auth } from './lib/firebase';
 
 interface Asset {
   id: string;
@@ -233,9 +235,46 @@ const INIT_ASSETS = [SAMPLE_ASSET_1, SAMPLE_ASSET_2];
 const INIT_CHECKS = [SAMPLE_CHECK_1, SAMPLE_CHECK_2, SAMPLE_CHECK_3];
 
 export default function App() {
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authError, setAuthError] = useState('');
+  const [isLogin, setIsLogin] = useState(true);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+
   const [assets, setAssets] = useState<Asset[]>(INIT_ASSETS);
   const [checks, setChecks] = useState<CheckResult[]>(INIT_CHECKS);
   
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, user => {
+      setCurrentUser(user);
+      setAuthLoading(false);
+    });
+    return unsub;
+  }, []);
+
+  const handleAuth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError('');
+    try {
+      if (isLogin) {
+        await signInWithEmailAndPassword(auth, email, password);
+      } else {
+        await createUserWithEmailAndPassword(auth, email, password);
+      }
+    } catch (err: any) {
+      setAuthError(err.message || 'Authentication failed');
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+    } catch(err) {
+      console.error(err);
+    }
+  };
+
   const [activeTab, setActiveTab] = useState<'detection' | 'dashboard'>('detection');
   const [activeAlert, setActiveAlert] = useState<CheckResult | null>(null);
 
@@ -266,6 +305,9 @@ export default function App() {
   const [sortField, setSortField] = useState<'timestamp' | 'platform' | 'confidence'>('timestamp');
   const [sortDir, setSortDir] = useState<'desc' | 'asc'>('desc');
 
+  const [tasks, setTasks] = useState<{id: string, fileName: string, status: string}[]>([]);
+  const [assetSearch, setAssetSearch] = useState('');
+
   const getFilteredAndSortedChecks = () => {
     let filtered = checks;
     if (filterStatus !== 'All') {
@@ -289,6 +331,11 @@ export default function App() {
   };
 
   const processedChecks = getFilteredAndSortedChecks();
+
+  const filteredAssets = assets.filter(a => 
+    a.filename.toLowerCase().includes(assetSearch.toLowerCase()) || 
+    a.watermarkId.toLowerCase().includes(assetSearch.toLowerCase())
+  );
 
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -340,15 +387,23 @@ export default function App() {
       return;
     }
 
-    setIsAnalyzing(true);
     setDetectError('');
-    setLatestResult(null);
+
+    const taskId = Math.random().toString(36).substring(2, 9);
+    const taskFileName = suspectFile.name;
+    const fileToProcess = suspectFile;
+    const platformToProcess = platform;
+    const originalAssetIdToProcess = selectedAssetId;
+
+    setTasks(prev => [{ id: taskId, fileName: taskFileName, status: 'Processing...' }, ...prev]);
+    setSuspectFile(null);
+    if (suspectInputRef.current) suspectInputRef.current.value = '';
 
     try {
-      const original = assets.find(a => a.id === selectedAssetId);
+      const original = assets.find(a => a.id === originalAssetIdToProcess);
       if (!original) throw new Error("Original asset not found");
 
-      const suspectB64 = await fileToBase64(suspectFile);
+      const suspectB64 = await fileToBase64(fileToProcess);
       const originalData = getInlineData(original.imageStr);
       const suspectData = getInlineData(suspectB64);
 
@@ -400,7 +455,7 @@ Reply EXCLUSIVELY with a JSON object containing the following keys (no markdown 
         confidence: resultData.confidence || 0,
         explanation: resultData.explanation || 'No explanation provided.',
         textOverlayDetected: !!resultData.textOverlayDetected,
-        platform,
+        platform: platformToProcess,
         sourceTrace: resultData.match ? original.watermarkId : '',
         alertStatus,
         originalAssetId: original.id
@@ -412,15 +467,59 @@ Reply EXCLUSIVELY with a JSON object containing the following keys (no markdown 
       if (alertStatus === 'High-Risk') {
         setActiveAlert(newCheck);
       }
+      setTasks(prev => prev.map(t => t.id === taskId ? { ...t, status: 'Completed' } : t));
     } catch (err: any) {
       console.error(err);
+      setTasks(prev => prev.map(t => t.id === taskId ? { ...t, status: 'Failed' } : t));
       setDetectError(err.message || 'Analysis failed. Make sure your API key is valid.');
-    } finally {
-      setIsAnalyzing(false);
     }
   };
 
   const currentOriginal = assets.find(a => a.id === selectedAssetId);
+
+  if (authLoading) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-slate-50">
+        <Activity className="animate-spin text-blue-500" size={32} />
+      </div>
+    );
+  }
+
+  if (!currentUser) {
+    return (
+      <div className="flex h-screen bg-slate-50 font-sans text-slate-800 items-center justify-center p-4">
+        <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-8 w-full max-w-md">
+          <div className="flex justify-center mb-6">
+            <div className="bg-slate-900 p-3 rounded-full inline-block">
+              <ShieldAlert className="text-blue-400" size={32} />
+            </div>
+          </div>
+          <h1 className="text-2xl justify-center font-bold text-center text-slate-800 mb-2">SMIG Grid</h1>
+          <p className="text-sm text-center text-slate-500 mb-6">Media Integrity Dashboard Authentication</p>
+          
+          <form onSubmit={handleAuth} className="space-y-4">
+            {authError && <div className="p-3 bg-red-100 text-red-700 text-sm rounded border border-red-200">{authError}</div>}
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1">Email</label>
+              <input type="email" value={email} onChange={e => setEmail(e.target.value)} required className="w-full text-sm border border-slate-300 rounded-md px-3 py-2 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"/>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1">Password</label>
+              <input type="password" value={password} onChange={e => setPassword(e.target.value)} required className="w-full text-sm border border-slate-300 rounded-md px-3 py-2 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"/>
+            </div>
+            <button type="submit" className="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 rounded-md transition-colors flex items-center justify-center">
+              {isLogin ? 'Sign In' : 'Sign Up'}
+            </button>
+          </form>
+          <div className="mt-4 text-center">
+            <button type="button" onClick={() => {setIsLogin(!isLogin); setAuthError('');}} className="text-sm text-blue-600 hover:text-blue-800 font-medium">
+              {isLogin ? "Don't have an account? Sign up" : 'Already have an account? Sign in'}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-screen bg-slate-50 font-sans overflow-hidden text-slate-800">
@@ -493,17 +592,26 @@ Reply EXCLUSIVELY with a JSON object containing the following keys (no markdown 
           </form>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-6 bg-slate-50">
-          <h2 className="font-semibold text-slate-700 mb-4 flex items-center gap-2">
-            <List size={18} /> Registered Assets ({assets.length})
-          </h2>
-          {assets.length === 0 ? (
+        <div className="flex-1 min-h-0 flex flex-col p-6 bg-slate-50">
+          <div className="shrink-0 mb-4">
+            <h2 className="font-semibold text-slate-700 mb-4 flex items-center gap-2">
+              <List size={18} /> Registered Assets ({assets.length})
+            </h2>
+            <input
+              type="text"
+              placeholder="Search filename or ID..."
+              value={assetSearch}
+              onChange={(e) => setAssetSearch(e.target.value)}
+              className="w-full text-sm border border-slate-300 rounded-md px-3 py-2 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 bg-white"
+            />
+          </div>
+          {filteredAssets.length === 0 ? (
             <div className="text-center text-sm text-slate-400 py-8">
-              No assets registered yet.
+              No assets match your search.
             </div>
           ) : (
-            <div className="space-y-4">
-              {assets.map(asset => (
+            <div className="space-y-4 overflow-y-auto flex-1 pr-1 pb-4">
+              {filteredAssets.map(asset => (
                 <div key={asset.id} className="bg-white border border-slate-200 rounded-lg p-3 shadow-sm flex gap-3 cursor-pointer hover:border-blue-300 transition-colors" onClick={() => setSelectedAssetId(asset.id)}>
                   <div className="w-16 h-16 shrink-0 bg-slate-100 rounded overflow-hidden">
                     <img src={asset.imageStr} alt={asset.filename} className="w-full h-full object-cover" />
@@ -562,6 +670,21 @@ Reply EXCLUSIVELY with a JSON object containing the following keys (no markdown 
           >
             Live Dashboard
           </button>
+          
+          <div className="flex-1 flex items-center justify-end px-4 gap-4">
+            {tasks.length > 0 && (
+              <div className="flex items-center gap-2 text-sm text-slate-600">
+                <Activity size={16} className={tasks.some(t => t.status === 'Processing...') ? 'animate-spin' : ''} />
+                <span className="font-medium">{tasks.filter(t => t.status === 'Processing...').length} Active Tasks</span>
+              </div>
+            )}
+            <div className="text-sm border-l border-slate-200 pl-4 py-2 flex items-center gap-3">
+              <span className="text-slate-500 hidden sm:inline-block">{currentUser.email}</span>
+              <button onClick={handleLogout} className="text-slate-500 hover:text-red-600 font-medium flex items-center gap-1 transition-colors" title="Sign Out">
+                <LogOut size={16} /> 
+              </button>
+            </div>
+          </div>
         </div>
 
         {/* Tab Content */}
@@ -655,11 +778,11 @@ Reply EXCLUSIVELY with a JSON object containing the following keys (no markdown 
                          
                          <button 
                             type="submit" 
-                            disabled={!suspectFile || isAnalyzing}
+                            disabled={!suspectFile}
                             className="px-6 py-2 bg-slate-900 hover:bg-slate-800 text-white font-medium rounded-lg transition-colors disabled:opacity-50 flex items-center gap-2 h-[38px] w-48 justify-center"
                           >
-                            {isAnalyzing ? <Activity className="animate-spin" size={18} /> : <ShieldCheck size={18} />}
-                            {isAnalyzing ? 'Analyzing...' : 'Run Analysis'}
+                            <ShieldCheck size={18} />
+                            Queue Analysis
                           </button>
                       </div>
 
@@ -673,7 +796,39 @@ Reply EXCLUSIVELY with a JSON object containing the following keys (no markdown 
                 </div>
               </div>
 
-              {/* LATEST RESULT */}
+              {/* TASK QUEUE & LATEST RESULT */}
+              {tasks.length > 0 && (
+                <div className="mt-8 rounded-xl shadow-sm border border-slate-200 overflow-hidden bg-white">
+                  <div className="bg-slate-50 border-b border-slate-200 p-4 font-semibold text-slate-700 flex items-center gap-2">
+                    <Activity size={18} />
+                    Analysis Task Queue
+                  </div>
+                  <div className="divide-y divide-slate-100 max-h-48 overflow-y-auto">
+                    {tasks.map(task => (
+                      <div key={task.id} className="p-3 px-6 flex items-center justify-between text-sm">
+                        <div className="flex items-center gap-3">
+                          {task.status === 'Processing...' ? (
+                            <Activity size={16} className="text-blue-500 animate-spin" />
+                          ) : task.status === 'Completed' ? (
+                            <CheckCircle size={16} className="text-green-500" />
+                          ) : (
+                            <AlertTriangle size={16} className="text-red-500" />
+                          )}
+                          <span className="font-medium text-slate-800">{task.fileName}</span>
+                        </div>
+                        <span className={`text-xs font-semibold px-2 py-1 rounded-full ${
+                          task.status === 'Processing...' ? 'bg-blue-100 text-blue-700' :
+                          task.status === 'Completed' ? 'bg-green-100 text-green-700' :
+                          'bg-red-100 text-red-700'
+                        }`}>
+                          {task.status}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {latestResult && (
                 <div className={`mt-8 rounded-xl shadow-sm border overflow-hidden ${latestResult.alertStatus === 'High-Risk' ? 'border-red-300' : latestResult.alertStatus === 'Low-Risk' ? 'border-green-300' : 'border-slate-200'}`}>
                   <div className={`p-4 font-semibold flex items-center justify-between ${
