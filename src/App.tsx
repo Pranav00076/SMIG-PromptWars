@@ -2,9 +2,10 @@ import React, { useState, useRef, useEffect } from 'react';
 import ReactCrop, { type Crop, centerCrop, makeAspectCrop } from 'react-image-crop';
 import 'react-image-crop/dist/ReactCrop.css';
 import { GoogleGenAI } from '@google/genai';
+import DetectionMap from './components/DetectionMap';
 import {
   ShieldAlert, ShieldCheck, Upload, Image as ImageIcon,
-  CheckCircle, AlertTriangle, X, Database, FileText, Copy, Activity, Clock, List, LogOut
+  CheckCircle, AlertTriangle, X, Database, FileText, Copy, Activity, Clock, List, LogOut, Download, Key
 } from 'lucide-react';
 import { signInWithEmailAndPassword, createUserWithEmailAndPassword, onAuthStateChanged, signOut, User } from 'firebase/auth';
 import { auth } from './lib/firebase';
@@ -33,6 +34,7 @@ interface CheckResult {
   sourceTrace: string;
   alertStatus: 'Safe' | 'High-Risk' | 'Low-Risk';
   originalAssetId: string;
+  location?: [number, number];
 }
 
 const fileToBase64 = (file: File): Promise<string> => {
@@ -203,6 +205,7 @@ const SAMPLE_CHECK_1: CheckResult = {
   sourceTrace: 'Broadcaster-Sky-UK-01',
   alertStatus: 'High-Risk',
   originalAssetId: 'sample-asset-1',
+  location: [37.6173, 55.7558], // Moscow
 };
 
 const SAMPLE_CHECK_2: CheckResult = {
@@ -216,6 +219,7 @@ const SAMPLE_CHECK_2: CheckResult = {
   sourceTrace: 'League-Pass-Int-99',
   alertStatus: 'Low-Risk',
   originalAssetId: 'sample-asset-2',
+  location: [-0.1276, 51.5072], // London
 };
 
 const SAMPLE_CHECK_3: CheckResult = {
@@ -229,6 +233,7 @@ const SAMPLE_CHECK_3: CheckResult = {
   sourceTrace: '',
   alertStatus: 'Safe',
   originalAssetId: 'sample-asset-1',
+  location: [-74.0060, 40.7128], // New York
 };
 
 const INIT_ASSETS = [SAMPLE_ASSET_1, SAMPLE_ASSET_2];
@@ -275,6 +280,46 @@ export default function App() {
     }
   };
 
+  const exportData = (type: 'assets' | 'logs', format: 'csv' | 'json') => {
+    let dataStr = '';
+    let mimeType = '';
+    let fileName = '';
+
+    if (type === 'assets') {
+      fileName = `registered_assets.${format}`;
+      if (format === 'json') {
+        const payload = assets.map(a => ({ id: a.id, filename: a.filename, timestamp: a.timestamp, watermarkId: a.watermarkId, hash: a.hash }));
+        dataStr = JSON.stringify(payload, null, 2);
+        mimeType = 'application/json';
+      } else {
+        const header = ['ID', 'Filename', 'Timestamp', 'Watermark ID', 'Hash'].join(',');
+        const rows = assets.map(a => [a.id, a.filename, new Date(a.timestamp).toISOString(), a.watermarkId, a.hash].join(','));
+        dataStr = [header, ...rows].join('\n');
+        mimeType = 'text/csv';
+      }
+    } else {
+      fileName = `detection_logs.${format}`;
+      if (format === 'json') {
+        const payload = checks.map(c => ({ id: c.id, timestamp: c.timestamp, originalAssetId: c.originalAssetId, platform: c.platform, confidence: c.confidence, match: c.match, alertStatus: c.alertStatus, explanation: c.explanation, textOverlayDetected: c.textOverlayDetected }));
+        dataStr = JSON.stringify(payload, null, 2);
+        mimeType = 'application/json';
+      } else {
+        const header = ['ID', 'Timestamp', 'Original Asset ID', 'Platform', 'Confidence', 'Match', 'Status', 'Text Overlay'].join(',');
+        const rows = checks.map(c => [c.id, new Date(c.timestamp).toISOString(), c.originalAssetId, c.platform, c.confidence, c.match, c.alertStatus, c.textOverlayDetected || false].join(','));
+        dataStr = [header, ...rows].join('\n');
+        mimeType = 'text/csv';
+      }
+    }
+
+    const blob = new Blob([dataStr], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   const [activeTab, setActiveTab] = useState<'detection' | 'dashboard'>('detection');
   const [activeAlert, setActiveAlert] = useState<CheckResult | null>(null);
 
@@ -307,6 +352,11 @@ export default function App() {
 
   const [tasks, setTasks] = useState<{id: string, fileName: string, status: string}[]>([]);
   const [assetSearch, setAssetSearch] = useState('');
+  const [customApiKey, setCustomApiKey] = useState(() => localStorage.getItem('smig_gemini_api_key') || '');
+
+  useEffect(() => {
+    localStorage.setItem('smig_gemini_api_key', customApiKey);
+  }, [customApiKey]);
 
   const getFilteredAndSortedChecks = () => {
     let filtered = checks;
@@ -381,9 +431,9 @@ export default function App() {
     e.preventDefault();
     if (!suspectFile || !selectedAssetId) return;
 
-    const apiKey = process.env.GEMINI_API_KEY;
+    const apiKey = customApiKey || process.env.GEMINI_API_KEY;
     if (!apiKey) {
-      setDetectError("Gemini API Key is missing. Please configure it in AI Studio settings.");
+      setDetectError("Gemini API Key is missing. Please configure it in AI Studio settings or provide your own in the sidebar UI.");
       return;
     }
 
@@ -433,7 +483,7 @@ Reply EXCLUSIVELY with a JSON object containing the following keys (no markdown 
         }
       });
 
-      const text = response.text || "{}";
+      const text = response.text?.replace(/```json/gi, '').replace(/```/g, '').trim() || "{}";
       const resultData = JSON.parse(text);
 
       let alertStatus: 'Safe' | 'High-Risk' | 'Low-Risk' = 'Safe';
@@ -458,7 +508,8 @@ Reply EXCLUSIVELY with a JSON object containing the following keys (no markdown 
         platform: platformToProcess,
         sourceTrace: resultData.match ? original.watermarkId : '',
         alertStatus,
-        originalAssetId: original.id
+        originalAssetId: original.id,
+        location: [(Math.random() * 360) - 180, (Math.random() * 180) - 90] as [number, number]
       };
 
       setChecks([newCheck, ...checks]);
@@ -594,9 +645,15 @@ Reply EXCLUSIVELY with a JSON object containing the following keys (no markdown 
 
         <div className="flex-1 min-h-0 flex flex-col p-6 bg-slate-50">
           <div className="shrink-0 mb-4">
-            <h2 className="font-semibold text-slate-700 mb-4 flex items-center gap-2">
-              <List size={18} /> Registered Assets ({assets.length})
-            </h2>
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="font-semibold text-slate-700 flex items-center gap-2">
+                <List size={18} /> Registered Assets ({assets.length})
+              </h2>
+              <div className="flex gap-1">
+                 <button onClick={() => exportData('assets', 'csv')} className="flex items-center gap-1 text-xs bg-slate-200 hover:bg-slate-300 text-slate-700 px-2 py-1 rounded transition-colors" title="Export CSV"><Download size={12}/> CSV</button>
+                 <button onClick={() => exportData('assets', 'json')} className="flex items-center gap-1 text-xs bg-slate-200 hover:bg-slate-300 text-slate-700 px-2 py-1 rounded transition-colors" title="Export JSON"><Download size={12}/> JSON</button>
+              </div>
+            </div>
             <input
               type="text"
               placeholder="Search filename or ID..."
@@ -629,6 +686,24 @@ Reply EXCLUSIVELY with a JSON object containing the following keys (no markdown 
               ))}
             </div>
           )}
+        </div>
+
+        {/* Global Settings / API Key */}
+        <div className="p-4 bg-slate-100 border-t border-slate-200 flex-shrink-0">
+          <div className="flex items-center gap-2 mb-2">
+            <Key className="w-4 h-4 text-slate-500" />
+            <h3 className="text-sm font-semibold text-slate-700">Gemini Setup</h3>
+          </div>
+          <p className="text-[11px] text-slate-500 mb-2 leading-tight">
+            Use your personal Gemini API Key to bypass platform quota limits.
+          </p>
+          <input
+             type="password"
+             placeholder="Enter Custom API Key..."
+             className="w-full text-xs border border-slate-300 rounded px-3 py-2 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 bg-white"
+             value={customApiKey}
+             onChange={e => setCustomApiKey(e.target.value)}
+          />
         </div>
       </div>
 
@@ -982,11 +1057,17 @@ Sports Media Integrity Grid Security Engine`}
                  </div>
               </div>
 
+              <DetectionMap checks={checks} />
+
               <div className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
                 <div className="px-6 py-4 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
                   <h3 className="font-bold text-slate-700">Recent Checks Log</h3>
-                  <div className="flex gap-4">
-                    <div className="flex items-center gap-2">
+                  <div className="flex gap-4 items-center">
+                    <div className="flex gap-2">
+                       <button onClick={() => exportData('logs', 'csv')} className="flex items-center gap-1 text-xs bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 px-2 py-1 rounded transition-colors" title="Export Logs to CSV"><Download size={14}/> CSV</button>
+                       <button onClick={() => exportData('logs', 'json')} className="flex items-center gap-1 text-xs bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 px-2 py-1 rounded transition-colors" title="Export Logs to JSON"><Download size={14}/> JSON</button>
+                    </div>
+                    <div className="flex items-center gap-2 border-l border-slate-200 pl-4">
                       <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Filter:</span>
                       <select 
                         value={filterStatus}
